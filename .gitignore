@@ -12,3 +12,5 @@ token.json
 !.env.example
 matching
 misc/
+.idea
+analysis-documents

@@ -1,13 +1,14 @@
 import { Job } from "bullmq"
 import { countryCodes, dbServers, EngineType } from "../config/enums"
 import { ContextType } from "../libs/logger"
-import { jsonOrStringForDb, jsonOrStringToJson, stringOrNullForDb, stringToHash } from "../utils"
 import _ from "lodash"
 import { sources } from "../sites/sources"
-import items from "./../../pharmacyItems.json"
-import connections from "./../../brandConnections.json"
+import items from "./../data/pharmacyItems.json"
+import connections from "./../data/brandConnections.json"
+import {buildBrandIndex, buildCanonicalMapping} from "./brands-clustering";
+import {processProductsBatch} from "./brands-batch-processor";
 
-type BrandsMapping = {
+export type BrandsMapping = {
     [key: string]: string[]
 }
 
@@ -70,39 +71,58 @@ export async function assignBrandIfKnown(countryCode: countryCodes, source: sour
     const context = { scope: "assignBrandIfKnown" } as ContextType
 
     const brandsMapping = await getBrandsMapping()
+    const canonicalMapping = buildCanonicalMapping(brandsMapping)
+
+    /*
+    * create brand indexing using first word of brand name
+    * */
+    const brandIndex = buildBrandIndex(brandsMapping)
 
     const versionKey = "assignBrandIfKnown"
     let products = await getPharmacyItems(countryCode, source, versionKey, false)
-    let counter = 0
-    for (let product of products) {
-        counter++
 
-        if (product.m_id) {
-            // Already exists in the mapping table, probably no need to update
-            continue
+    /*
+    * To optimize performance we can use batch processing of products
+    * Process in batches will manage memory efficiently
+    * TODO: Consider migrating to a distributed batch processor like BullMQ for better scalability
+    * */
+    const BATCH_SIZE = 100
+    const totalBatches = Math.ceil(products.length / BATCH_SIZE)
+
+    console.log(`Processing ${products.length} products in ${totalBatches} batches of ${BATCH_SIZE}`)
+
+    for (let i = 0; i < products.length; i += BATCH_SIZE) {
+        const batchNumber = Math.floor(i / BATCH_SIZE) + 1
+        const batch = products.slice(i, i + BATCH_SIZE)
+
+        const batchResults = await processProductsBatch(
+            batch,
+            brandsMapping,
+            canonicalMapping,
+            brandIndex,
+            source
+        )
+
+        // Log batch progress
+        console.log(`Batch ${batchNumber}/${totalBatches} completed: ${batchResults.length} products processed`)
+
+        /*
+        * TODO: Consider migrating to a distributed batch processor like BullMQ for better scalability,
+        *  perform optimally while storing into DB
+        * */
+        let counter = 0;
+        for (const result of batchResults) {
+            /*
+            * store result into db - batch insertion.
+            * */
+            console.log(`${counter++}# ${result.product.title} -> ${_.uniq(result.matchedBrands)} -> Final: ${result.finalBrand}`)
         }
 
-        let matchedBrands = []
-        for (const brandKey in brandsMapping) {
-            const relatedBrands = brandsMapping[brandKey]
-            for (const brand of relatedBrands) {
-                if (matchedBrands.includes(brand)) {
-                    continue
-                }
-                const isBrandMatch = checkBrandIsSeparateTerm(product.title, brand)
-                if (isBrandMatch) {
-                    matchedBrands.push(brand)
-                }
-            }
-        }
-        console.log(`${product.title} -> ${_.uniq(matchedBrands)}`)
-        const sourceId = product.source_id
-        const meta = { matchedBrands }
-        const brand = matchedBrands.length ? matchedBrands[0] : null
-
-        const key = `${source}_${countryCode}_${sourceId}`
-        const uuid = stringToHash(key)
-
-        // Then brand is inserted into product mapping table
+        // Update job progress if using BullMQ
+        /*if (job) {
+            await job.progress((i + BATCH_SIZE) / products.length * 100)
+        }*/
     }
+
+    console.log(`Completed processing all ${products.length} products`)
 }
