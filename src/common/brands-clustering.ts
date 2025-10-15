@@ -4,7 +4,7 @@ import {BrandsMapping} from "./brands";
 * 2nd task: products from a group always assign same brand.
 * Finds connected brands (clusters) where all brands map to same canonical brand
 * */
-function findBrandClusters(brandsMapping: BrandsMapping): Map<string, number> {
+export function findBrandClusters(brandsMapping: BrandsMapping): Map<string, number> {
     const visited = new Set<string>()
     const brandToCluster = new Map<string, number>()
     let clusterId = 0
